@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Flippermove – verschiebt Pinball-Dateien auf einen Samba-Share.
+Flippermove – verschiebt Pinball-Dateien und -Verzeichnisse auf einen Samba-Share.
 """
 
 import sys
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -18,12 +19,12 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 
 # ── Konfiguration ──────────────────────────────────────────────────────────────
-SOURCE_DIR    = Path("/home/frank/Downloads/__Pinball")
-SMB_HOST      = "192.168.0.41"
-SMB_USER      = "flipper"
-SMB_SHARE     = "vPinball"
-KEYRING_SVC   = "flippermove"
-TRANSFER_DIR  = "Transfer"
+SOURCE_DIR   = Path("/home/frank/Downloads/__Pinball")
+SMB_HOST     = "192.168.0.41"
+SMB_USER     = "flipper"
+SMB_SHARE    = "vPinball"
+KEYRING_SVC  = "flippermove"
+TRANSFER_DIR = "Transfer"
 
 ROUTES: dict[str, str] = {
     ".vpx":       "VisualPinball/Tables",
@@ -47,40 +48,94 @@ def set_password(pw: str) -> None:
     keyring.set_password(KEYRING_SVC, SMB_USER, pw)
 
 
-def smb_put(local_path: Path, remote_dir: str, password: str) -> tuple[bool, str]:
-    """Überträgt eine Datei via smbclient auf den Share."""
+def _smb_run(commands: list[str], password: str, timeout: int = 120) -> tuple[bool, str]:
+    """Führt eine Liste von smbclient-Kommandos in einem einzigen Aufruf aus."""
     cmd = [
         "smbclient",
         f"//{SMB_HOST}/{SMB_SHARE}",
         f"--user={SMB_USER}%{password}",
-        "-c",
-        f'put "{local_path}" "{remote_dir}/{local_path.name}"',
+        "-c", "; ".join(commands),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     stderr = result.stderr.strip()
     stdout = result.stdout.strip()
-
     if result.returncode != 0 or "NT_STATUS" in stdout or "NT_STATUS" in stderr:
         detail = stderr or stdout or f"Exit-Code {result.returncode}"
         return False, detail
-
     return True, ""
+
+
+def smb_put(local_path: Path, remote_dir: str, password: str) -> tuple[bool, str]:
+    """Überträgt eine einzelne Datei auf den Share."""
+    return _smb_run(
+        [f'put "{local_path}" "{remote_dir}/{local_path.name}"'],
+        password,
+    )
+
+
+def smb_put_dir(local_dir: Path, remote_base: str, password: str) -> tuple[bool, str]:
+    """Überträgt ein Verzeichnis rekursiv auf den Share.
+
+    Erstellt zuerst alle nötigen Unterverzeichnisse, dann lädt es alle
+    Dateien hoch – alles in einem smbclient-Aufruf pro Batch.
+    """
+    dir_name   = local_dir.name
+    remote_top = f"{remote_base}/{dir_name}"
+
+    # Alle Einträge sortiert sammeln (Verzeichnisse vor Dateien)
+    all_items = sorted(local_dir.rglob("*"))
+    dirs  = [p for p in all_items if p.is_dir()]
+    files = [p for p in all_items if p.is_file()]
+
+    commands: list[str] = []
+
+    # Zielverzeichnis anlegen
+    commands.append(f'mkdir "{remote_top}"')
+
+    # Unterverzeichnisse anlegen
+    for d in dirs:
+        rel          = d.relative_to(local_dir)
+        remote_path  = f"{remote_top}/{rel.as_posix()}"
+        commands.append(f'mkdir "{remote_path}"')
+
+    # Dateien hochladen
+    for f in files:
+        rel         = f.relative_to(local_dir)
+        remote_path = f"{remote_top}/{rel.parent.as_posix()}" if rel.parent != Path(".") \
+                      else remote_top
+        commands.append(f'put "{f}" "{remote_path}/{f.name}"')
+
+    if not commands:
+        return True, ""  # leeres Verzeichnis – trotzdem Erfolg
+
+    ok, err = _smb_run(commands, password, timeout=600)
+    return ok, err
 
 
 # ── Transfer-Rückfrage-Dialog ──────────────────────────────────────────────────
 
 class TransferDialog(QDialog):
-    """Zeigt unbekannte Dateien und fragt, ob sie nach Transfer/ sollen."""
+    """Listet Dateien/Verzeichnisse ohne Kategorie und fragt nach Transfer/."""
 
-    def __init__(self, unknown_files: list[Path], parent=None):
+    def __init__(self, unknown: list[Path], parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Unbekannte Dateitypen")
-        self.resize(560, 340)
+        self.setWindowTitle("Keine Kategorie zugeordnet")
+        self.resize(580, 360)
         layout = QVBoxLayout(self)
 
+        dirs  = [p for p in unknown if p.is_dir()]
+        files = [p for p in unknown if p.is_file()]
+
+        parts = []
+        if files:
+            parts.append(f"{len(files)} Datei(en) unbekannten Typs")
+        if dirs:
+            parts.append(f"{len(dirs)} Verzeichnis(se)")
+        summary = " und ".join(parts)
+
         info = QLabel(
-            f"Die folgenden {len(unknown_files)} Datei(en) gehören keiner bekannten\n"
-            f"Kategorie an. Sollen sie nach <b>Transfer/</b> verschoben werden?"
+            f"{summary} können keiner Zielkategorie zugeordnet werden.\n"
+            "Sollen sie nach <b>Transfer/</b> verschoben werden?"
         )
         info.setTextFormat(Qt.TextFormat.RichText)
         info.setWordWrap(True)
@@ -88,8 +143,9 @@ class TransferDialog(QDialog):
 
         lst = QListWidget()
         lst.setFont(QFont("Monospace", 10))
-        for f in unknown_files:
-            lst.addItem(f"📄  {f.name}")
+        for p in unknown:
+            icon = "📁" if p.is_dir() else "📄"
+            lst.addItem(f"{icon}  {p.name}")
         layout.addWidget(lst)
 
         bb = QDialogButtonBox(
@@ -105,47 +161,57 @@ class TransferDialog(QDialog):
 # ── Worker-Thread ──────────────────────────────────────────────────────────────
 
 class MoveWorker(QThread):
-    """Führt den Upload + lokales Löschen im Hintergrund durch."""
+    """Führt Upload + lokales Löschen im Hintergrund durch."""
 
-    # (dateiname, status, detail)
+    # (name, status, detail)
     # status: "ok" | "error" | "del_error" | "skipped"
     done = pyqtSignal(list)
 
     def __init__(
         self,
-        files: list[Path],
+        items: list[Path],
         password: str,
         move_unknown: bool,
         parent=None,
     ):
         super().__init__(parent)
-        self.files        = files
+        self.items        = items
         self.password     = password
         self.move_unknown = move_unknown
 
     def run(self) -> None:
         results: list[tuple[str, str, str]] = []
-        for f in self.files:
-            ext = f.suffix.lower()
 
-            if ext in ROUTES:
+        for item in self.items:
+            is_dir = item.is_dir()
+            ext    = item.suffix.lower() if not is_dir else ""
+
+            # Ziel bestimmen
+            if not is_dir and ext in ROUTES:
                 remote_dir = ROUTES[ext]
             elif self.move_unknown:
                 remote_dir = TRANSFER_DIR
             else:
-                results.append((f.name, "skipped", "Dateityp nicht zugeordnet"))
+                results.append((item.name, "skipped", "Kein Ziel zugeordnet"))
                 continue
 
-            ok, err = smb_put(f, remote_dir, self.password)
+            # Upload
+            if is_dir:
+                ok, err = smb_put_dir(item, remote_dir, self.password)
+            else:
+                ok, err = smb_put(item, remote_dir, self.password)
 
             if ok:
                 try:
-                    f.unlink()
-                    results.append((f.name, "ok", remote_dir))
+                    if is_dir:
+                        shutil.rmtree(item)
+                    else:
+                        item.unlink()
+                    results.append((item.name, "ok", remote_dir))
                 except OSError as e:
-                    results.append((f.name, "del_error", str(e)))
+                    results.append((item.name, "del_error", str(e)))
             else:
-                results.append((f.name, "error", err))
+                results.append((item.name, "error", err))
 
         self.done.emit(results)
 
@@ -189,7 +255,7 @@ class ResultDialog(QDialog):
         text = QTextEdit()
         text.setReadOnly(True)
         text.setFont(QFont("Monospace", 10))
-        text.setPlainText("\n".join(lines) if lines else "Keine Dateien verarbeitet.")
+        text.setPlainText("\n".join(lines) if lines else "Keine Einträge verarbeitet.")
         layout.addWidget(text)
 
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
@@ -205,7 +271,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Flippermove")
         self.resize(720, 520)
         self._worker: MoveWorker | None = None
-        self._paths: list[Path] = []
+        self._items: list[Path] = []   # Dateien UND Verzeichnisse
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -244,32 +310,42 @@ class MainWindow(QMainWindow):
 
     def refresh(self) -> None:
         self.file_list.clear()
-        self._paths.clear()
+        self._items.clear()
 
         if not SOURCE_DIR.exists():
             self.status_label.setText(f"⚠️  Verzeichnis nicht gefunden: {SOURCE_DIR}")
             return
 
-        files = sorted(f for f in SOURCE_DIR.iterdir() if f.is_file())
+        # Verzeichnisse zuerst, dann Dateien – jeweils alphabetisch
+        entries = sorted(SOURCE_DIR.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
 
-        for f in files:
-            ext  = f.suffix.lower()
-            icon = FILE_ICONS.get(ext, "📄")
-            item = QListWidgetItem(f"{icon}  {f.name}")
-
-            if ext not in ROUTES:
-                item.setForeground(Qt.GlobalColor.gray)
+        for entry in entries:
+            if entry.is_dir():
+                item = QListWidgetItem(f"📁  {entry.name}/")
+                item.setForeground(Qt.GlobalColor.darkCyan)
+            else:
+                ext  = entry.suffix.lower()
+                icon = FILE_ICONS.get(ext, "📄")
+                item = QListWidgetItem(f"{icon}  {entry.name}")
+                if ext not in ROUTES:
+                    item.setForeground(Qt.GlobalColor.gray)
 
             self.file_list.addItem(item)
-            self._paths.append(f)
+            self._items.append(entry)
 
-        total    = len(self._paths)
-        moveable = sum(1 for f in self._paths if f.suffix.lower() in ROUTES)
-        unknown  = total - moveable
-        hint     = f", {unknown} unbekannt (grau)" if unknown else ""
-        self.status_label.setText(
-            f"{total} Datei(en) gefunden, {moveable} zum Verschieben vorgesehen{hint}."
-        )
+        n_dirs     = sum(1 for p in self._items if p.is_dir())
+        n_files    = sum(1 for p in self._items if p.is_file())
+        n_moveable = sum(1 for p in self._items if p.is_file() and p.suffix.lower() in ROUTES)
+        n_unknown  = (n_files - n_moveable) + n_dirs
+
+        parts = []
+        if n_dirs:
+            parts.append(f"{n_dirs} Verzeichnis(se)")
+        if n_files:
+            parts.append(f"{n_files} Datei(en), davon {n_moveable} zugeordnet")
+        if n_unknown:
+            parts.append(f"{n_unknown} ohne Ziel (grau/cyan)")
+        self.status_label.setText("  |  ".join(parts) if parts else "Verzeichnis ist leer.")
 
     # ── Passwort-Verwaltung ────────────────────────────────────────────────────
 
@@ -302,16 +378,19 @@ class MainWindow(QMainWindow):
         if self._worker and self._worker.isRunning():
             return
 
-        if not self._paths:
-            self.status_label.setText("ℹ️  Keine Dateien im Quellverzeichnis.")
+        if not self._items:
+            self.status_label.setText("ℹ️  Keine Einträge im Quellverzeichnis.")
             return
 
         pw = self._ensure_password()
         if not pw:
             return
 
-        # Unbekannte Dateien ermitteln und ggf. nachfragen
-        unknown = [f for f in self._paths if f.suffix.lower() not in ROUTES]
+        # Einträge ohne zugeordnetes Ziel ermitteln
+        unknown = [
+            p for p in self._items
+            if p.is_dir() or p.suffix.lower() not in ROUTES
+        ]
         move_unknown = False
         if unknown:
             dlg = TransferDialog(unknown, self)
@@ -319,18 +398,16 @@ class MainWindow(QMainWindow):
 
         self.btn_move.setEnabled(False)
         self.btn_refresh.setEnabled(False)
-        self.status_label.setText("⏳  Dateien werden verschoben …")
+        self.status_label.setText("⏳  Wird verschoben …")
 
-        self._worker = MoveWorker(list(self._paths), pw, move_unknown, self)
+        self._worker = MoveWorker(list(self._items), pw, move_unknown, self)
         self._worker.done.connect(self.on_move_done)
         self._worker.start()
 
     def on_move_done(self, results: list[tuple[str, str, str]]) -> None:
         self.btn_move.setEnabled(True)
         self.btn_refresh.setEnabled(True)
-
-        dlg = ResultDialog(results, self)
-        dlg.exec()
+        ResultDialog(results, self).exec()
         self.refresh()
 
 
