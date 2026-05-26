@@ -4,6 +4,7 @@ Flippermove – verschiebt Pinball-Dateien und -Verzeichnisse auf einen Samba-Sh
 """
 
 import sys
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,7 +17,7 @@ from PyQt6.QtWidgets import (
     QInputDialog, QLineEdit,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 
 # ── Konfiguration ──────────────────────────────────────────────────────────────
 SOURCE_DIR   = Path("/home/frank/Downloads/__Pinball")
@@ -38,6 +39,15 @@ FILE_ICONS: dict[str, str] = {
     ".zip":       "📦",
 }
 # ──────────────────────────────────────────────────────────────────────────────
+
+
+def resource_path(filename: str) -> str:
+    """Gibt den korrekten Pfad zur Ressource zurück –
+    funktioniert sowohl im PyInstaller-Bundle (_MEIPASS)
+    als auch beim direkten Ausführen des Scripts."""
+    if hasattr(sys, "_MEIPASS"):
+        return os.path.join(sys._MEIPASS, filename)
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
 
 
 def get_password() -> str | None:
@@ -74,31 +84,22 @@ def smb_put(local_path: Path, remote_dir: str, password: str) -> tuple[bool, str
 
 
 def smb_put_dir(local_dir: Path, remote_base: str, password: str) -> tuple[bool, str]:
-    """Überträgt ein Verzeichnis rekursiv auf den Share.
-
-    Erstellt zuerst alle nötigen Unterverzeichnisse, dann lädt es alle
-    Dateien hoch – alles in einem smbclient-Aufruf pro Batch.
-    """
+    """Überträgt ein Verzeichnis rekursiv auf den Share."""
     dir_name   = local_dir.name
     remote_top = f"{remote_base}/{dir_name}"
 
-    # Alle Einträge sortiert sammeln (Verzeichnisse vor Dateien)
     all_items = sorted(local_dir.rglob("*"))
     dirs  = [p for p in all_items if p.is_dir()]
     files = [p for p in all_items if p.is_file()]
 
     commands: list[str] = []
-
-    # Zielverzeichnis anlegen
     commands.append(f'mkdir "{remote_top}"')
 
-    # Unterverzeichnisse anlegen
     for d in dirs:
-        rel          = d.relative_to(local_dir)
-        remote_path  = f"{remote_top}/{rel.as_posix()}"
+        rel         = d.relative_to(local_dir)
+        remote_path = f"{remote_top}/{rel.as_posix()}"
         commands.append(f'mkdir "{remote_path}"')
 
-    # Dateien hochladen
     for f in files:
         rel         = f.relative_to(local_dir)
         remote_path = f"{remote_top}/{rel.parent.as_posix()}" if rel.parent != Path(".") \
@@ -106,17 +107,14 @@ def smb_put_dir(local_dir: Path, remote_base: str, password: str) -> tuple[bool,
         commands.append(f'put "{f}" "{remote_path}/{f.name}"')
 
     if not commands:
-        return True, ""  # leeres Verzeichnis – trotzdem Erfolg
+        return True, ""
 
-    ok, err = _smb_run(commands, password, timeout=600)
-    return ok, err
+    return _smb_run(commands, password, timeout=600)
 
 
 # ── Transfer-Rückfrage-Dialog ──────────────────────────────────────────────────
 
 class TransferDialog(QDialog):
-    """Listet Dateien/Verzeichnisse ohne Kategorie und fragt nach Transfer/."""
-
     def __init__(self, unknown: list[Path], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Keine Kategorie zugeordnet")
@@ -161,19 +159,9 @@ class TransferDialog(QDialog):
 # ── Worker-Thread ──────────────────────────────────────────────────────────────
 
 class MoveWorker(QThread):
-    """Führt Upload + lokales Löschen im Hintergrund durch."""
-
-    # (name, status, detail)
-    # status: "ok" | "error" | "del_error" | "skipped"
     done = pyqtSignal(list)
 
-    def __init__(
-        self,
-        items: list[Path],
-        password: str,
-        move_unknown: bool,
-        parent=None,
-    ):
+    def __init__(self, items: list[Path], password: str, move_unknown: bool, parent=None):
         super().__init__(parent)
         self.items        = items
         self.password     = password
@@ -186,7 +174,6 @@ class MoveWorker(QThread):
             is_dir = item.is_dir()
             ext    = item.suffix.lower() if not is_dir else ""
 
-            # Ziel bestimmen
             if not is_dir and ext in ROUTES:
                 remote_dir = ROUTES[ext]
             elif self.move_unknown:
@@ -195,7 +182,6 @@ class MoveWorker(QThread):
                 results.append((item.name, "skipped", "Kein Ziel zugeordnet"))
                 continue
 
-            # Upload
             if is_dir:
                 ok, err = smb_put_dir(item, remote_dir, self.password)
             else:
@@ -269,9 +255,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Flippermove")
+        self.setWindowIcon(QIcon(resource_path("flippermove.png")))
         self.resize(720, 520)
         self._worker: MoveWorker | None = None
-        self._items: list[Path] = []   # Dateien UND Verzeichnisse
+        self._items: list[Path] = []
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -306,8 +293,6 @@ class MainWindow(QMainWindow):
 
         self.refresh()
 
-    # ── Verzeichnis einlesen ───────────────────────────────────────────────────
-
     def refresh(self) -> None:
         self.file_list.clear()
         self._items.clear()
@@ -316,7 +301,6 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"⚠️  Verzeichnis nicht gefunden: {SOURCE_DIR}")
             return
 
-        # Verzeichnisse zuerst, dann Dateien – jeweils alphabetisch
         entries = sorted(SOURCE_DIR.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
 
         for entry in entries:
@@ -347,8 +331,6 @@ class MainWindow(QMainWindow):
             parts.append(f"{n_unknown} ohne Ziel (grau/cyan)")
         self.status_label.setText("  |  ".join(parts) if parts else "Verzeichnis ist leer.")
 
-    # ── Passwort-Verwaltung ────────────────────────────────────────────────────
-
     def _ensure_password(self) -> str | None:
         pw = get_password()
         if pw:
@@ -357,8 +339,7 @@ class MainWindow(QMainWindow):
 
     def _ask_password(self, title: str) -> str | None:
         pw, ok = QInputDialog.getText(
-            self,
-            title,
+            self, title,
             f"Passwort für {SMB_USER}@{SMB_HOST}:",
             QLineEdit.EchoMode.Password,
         )
@@ -372,12 +353,9 @@ class MainWindow(QMainWindow):
         if pw:
             self.status_label.setText("✅  Passwort im Keyring gespeichert.")
 
-    # ── Verschiebevorgang ──────────────────────────────────────────────────────
-
     def start_move(self) -> None:
         if self._worker and self._worker.isRunning():
             return
-
         if not self._items:
             self.status_label.setText("ℹ️  Keine Einträge im Quellverzeichnis.")
             return
@@ -386,11 +364,7 @@ class MainWindow(QMainWindow):
         if not pw:
             return
 
-        # Einträge ohne zugeordnetes Ziel ermitteln
-        unknown = [
-            p for p in self._items
-            if p.is_dir() or p.suffix.lower() not in ROUTES
-        ]
+        unknown = [p for p in self._items if p.is_dir() or p.suffix.lower() not in ROUTES]
         move_unknown = False
         if unknown:
             dlg = TransferDialog(unknown, self)
@@ -417,6 +391,7 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("Flippermove")
     app.setOrganizationName("gecko1a")
+    app.setWindowIcon(QIcon(resource_path("flippermove.png")))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
