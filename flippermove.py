@@ -28,7 +28,7 @@ KEYRING_SVC = "flippermove"
 ROUTES: dict[str, str] = {
     ".vpx":       "VisualPinball/Tables",
     ".directb2s": "VisualPinball/Tables",
-    ".zip":       "VPinMAME/roms",
+    ".zip":       "VisualPinball/VPinMAME/roms",
 }
 
 FILE_ICONS: dict[str, str] = {
