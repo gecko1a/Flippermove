@@ -4,7 +4,6 @@ Flippermove – verschiebt Pinball-Dateien auf einen Samba-Share.
 """
 
 import sys
-import os
 import subprocess
 from pathlib import Path
 
@@ -13,17 +12,18 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QPushButton, QListWidget, QListWidgetItem,
     QLabel, QDialog, QTextEdit, QDialogButtonBox,
-    QInputDialog, QLineEdit, QMessageBox,
+    QInputDialog, QLineEdit,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 
 # ── Konfiguration ──────────────────────────────────────────────────────────────
-SOURCE_DIR  = Path("/home/frank/Downloads/__Pinball")
-SMB_HOST    = "192.168.0.41"
-SMB_USER    = "flipper"
-SMB_SHARE   = "vPinball"
-KEYRING_SVC = "flippermove"
+SOURCE_DIR    = Path("/home/frank/Downloads/__Pinball")
+SMB_HOST      = "192.168.0.41"
+SMB_USER      = "flipper"
+SMB_SHARE     = "vPinball"
+KEYRING_SVC   = "flippermove"
+TRANSFER_DIR  = "Transfer"
 
 ROUTES: dict[str, str] = {
     ".vpx":       "VisualPinball/Tables",
@@ -60,12 +60,46 @@ def smb_put(local_path: Path, remote_dir: str, password: str) -> tuple[bool, str
     stderr = result.stderr.strip()
     stdout = result.stdout.strip()
 
-    # smbclient gibt manchmal 0 zurück, meldet aber trotzdem NT_STATUS-Fehler
     if result.returncode != 0 or "NT_STATUS" in stdout or "NT_STATUS" in stderr:
         detail = stderr or stdout or f"Exit-Code {result.returncode}"
         return False, detail
 
     return True, ""
+
+
+# ── Transfer-Rückfrage-Dialog ──────────────────────────────────────────────────
+
+class TransferDialog(QDialog):
+    """Zeigt unbekannte Dateien und fragt, ob sie nach Transfer/ sollen."""
+
+    def __init__(self, unknown_files: list[Path], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Unbekannte Dateitypen")
+        self.resize(560, 340)
+        layout = QVBoxLayout(self)
+
+        info = QLabel(
+            f"Die folgenden {len(unknown_files)} Datei(en) gehören keiner bekannten\n"
+            f"Kategorie an. Sollen sie nach <b>Transfer/</b> verschoben werden?"
+        )
+        info.setTextFormat(Qt.TextFormat.RichText)
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        lst = QListWidget()
+        lst.setFont(QFont("Monospace", 10))
+        for f in unknown_files:
+            lst.addItem(f"📄  {f.name}")
+        layout.addWidget(lst)
+
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No
+        )
+        bb.button(QDialogButtonBox.StandardButton.Yes).setText("Ja, nach Transfer/ verschieben")
+        bb.button(QDialogButtonBox.StandardButton.No).setText("Nein, überspringen")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        layout.addWidget(bb)
 
 
 # ── Worker-Thread ──────────────────────────────────────────────────────────────
@@ -77,21 +111,32 @@ class MoveWorker(QThread):
     # status: "ok" | "error" | "del_error" | "skipped"
     done = pyqtSignal(list)
 
-    def __init__(self, files: list[Path], password: str, parent=None):
+    def __init__(
+        self,
+        files: list[Path],
+        password: str,
+        move_unknown: bool,
+        parent=None,
+    ):
         super().__init__(parent)
-        self.files    = files
-        self.password = password
+        self.files        = files
+        self.password     = password
+        self.move_unknown = move_unknown
 
     def run(self) -> None:
         results: list[tuple[str, str, str]] = []
         for f in self.files:
             ext = f.suffix.lower()
-            if ext not in ROUTES:
+
+            if ext in ROUTES:
+                remote_dir = ROUTES[ext]
+            elif self.move_unknown:
+                remote_dir = TRANSFER_DIR
+            else:
                 results.append((f.name, "skipped", "Dateityp nicht zugeordnet"))
                 continue
 
-            remote_dir = ROUTES[ext]
-            ok, err    = smb_put(f, remote_dir, self.password)
+            ok, err = smb_put(f, remote_dir, self.password)
 
             if ok:
                 try:
@@ -160,7 +205,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Flippermove")
         self.resize(720, 520)
         self._worker: MoveWorker | None = None
-        # Bildet Listeneintrag-Index → Path-Objekt ab
         self._paths: list[Path] = []
 
         central = QWidget()
@@ -168,18 +212,15 @@ class MainWindow(QMainWindow):
         vbox = QVBoxLayout(central)
         vbox.setSpacing(8)
 
-        # Quellverzeichnis-Label
         hdr = QLabel(f"📁  {SOURCE_DIR}")
         hdr.setFont(QFont("Sans", 10, QFont.Weight.Bold))
         vbox.addWidget(hdr)
 
-        # Dateiliste
         self.file_list = QListWidget()
         self.file_list.setFont(QFont("Monospace", 10))
         self.file_list.setAlternatingRowColors(True)
         vbox.addWidget(self.file_list)
 
-        # Button-Zeile
         btn_row = QHBoxLayout()
         self.btn_refresh = QPushButton("🔄  Aktualisieren")
         self.btn_move    = QPushButton("🚀  Verschieben")
@@ -190,11 +231,9 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.btn_pw)
         vbox.addLayout(btn_row)
 
-        # Statuszeile
         self.status_label = QLabel("")
         vbox.addWidget(self.status_label)
 
-        # Signale verbinden
         self.btn_refresh.clicked.connect(self.refresh)
         self.btn_move.clicked.connect(self.start_move)
         self.btn_pw.clicked.connect(self.change_password)
@@ -219,7 +258,6 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(f"{icon}  {f.name}")
 
             if ext not in ROUTES:
-                # Grau = wird beim Verschieben nicht angefasst
                 item.setForeground(Qt.GlobalColor.gray)
 
             self.file_list.addItem(item)
@@ -227,8 +265,10 @@ class MainWindow(QMainWindow):
 
         total    = len(self._paths)
         moveable = sum(1 for f in self._paths if f.suffix.lower() in ROUTES)
+        unknown  = total - moveable
+        hint     = f", {unknown} unbekannt (grau)" if unknown else ""
         self.status_label.setText(
-            f"{total} Datei(en) gefunden, davon {moveable} zum Verschieben vorgesehen."
+            f"{total} Datei(en) gefunden, {moveable} zum Verschieben vorgesehen{hint}."
         )
 
     # ── Passwort-Verwaltung ────────────────────────────────────────────────────
@@ -270,11 +310,18 @@ class MainWindow(QMainWindow):
         if not pw:
             return
 
+        # Unbekannte Dateien ermitteln und ggf. nachfragen
+        unknown = [f for f in self._paths if f.suffix.lower() not in ROUTES]
+        move_unknown = False
+        if unknown:
+            dlg = TransferDialog(unknown, self)
+            move_unknown = dlg.exec() == QDialog.DialogCode.Accepted
+
         self.btn_move.setEnabled(False)
         self.btn_refresh.setEnabled(False)
         self.status_label.setText("⏳  Dateien werden verschoben …")
 
-        self._worker = MoveWorker(list(self._paths), pw, self)
+        self._worker = MoveWorker(list(self._paths), pw, move_unknown, self)
         self._worker.done.connect(self.on_move_done)
         self._worker.start()
 
