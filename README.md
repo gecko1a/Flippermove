@@ -1,5 +1,7 @@
 # Flippermove
 
+**Version 1.0**
+
 Desktop-Tool für CachyOS/KDE (Python + PyQt6), das Pinball-Dateien und Verzeichnisse
 aus einem lokalen Staging-Ordner auf einen Samba-Share verschiebt.
 
@@ -24,6 +26,7 @@ aus einem lokalen Staging-Ordner auf einen Samba-Share verschiebt.
 
 - Zeigt alle Dateien **und Unterverzeichnisse** aus `/home/frank/Downloads/__Pinball/` an
 - Verzeichnisse werden **cyan** dargestellt, unbekannte Dateitypen **grau**
+- Die aktuelle **Versionsnummer** ist in der Titelleiste und oben rechts in der Oberfläche sichtbar
 - Auf Knopfdruck werden folgende Typen automatisch zugeordnet und verschoben:
 
 | Endung | Ziel auf dem Share |
@@ -99,9 +102,11 @@ Das Passwort kann jederzeit über **„Passwort ändern"** aktualisiert werden.
 
 ## Konfiguration
 
-Alle Verbindungsparameter stehen am Anfang von `flippermove.py`:
+Alle Verbindungsparameter und die Versionsnummer stehen am Anfang von `flippermove.py`:
 
 ```python
+VERSION = "1.0"
+
 SOURCE_DIR   = Path("/home/frank/Downloads/__Pinball")
 SMB_HOST     = "192.168.0.41"
 SMB_USER     = "flipper"
@@ -117,7 +122,15 @@ ROUTES: dict[str, str] = {
 ```
 
 Um einen neuen Dateityp hinzuzufügen: Eintrag in `ROUTES` ergänzen,
-optional Icon-Emoji in `FILE_ICONS`, dann neu bauen.
+optional Icon-Emoji in `FILE_ICONS`, `VERSION` erhöhen, dann neu bauen.
+
+---
+
+## Versionsverlauf
+
+| Version | Änderung |
+|---|---|
+| 1.0 | Initiale Version: .vpx/.directb2s/.pov/.zip, Verzeichnisse rekursiv, Transfer-Fallback, KDE-Menü-Integration |
 
 ---
 
