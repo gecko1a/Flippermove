@@ -30,12 +30,14 @@ TRANSFER_DIR = "Transfer"
 ROUTES: dict[str, str] = {
     ".vpx":       "VisualPinball/Tables",
     ".directb2s": "VisualPinball/Tables",
+    ".pov":       "VisualPinball/Tables",
     ".zip":       "VisualPinball/VPinMAME/roms",
 }
 
 FILE_ICONS: dict[str, str] = {
     ".vpx":       "🎯",
     ".directb2s": "🖼️",
+    ".pov":       "🎥",
     ".zip":       "📦",
 }
 # ──────────────────────────────────────────────────────────────────────────────
