@@ -19,6 +19,10 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QIcon
 
+# ── Version ────────────────────────────────────────────────────────────────────
+VERSION = "1.0"
+# ──────────────────────────────────────────────────────────────────────────────
+
 # ── Konfiguration ──────────────────────────────────────────────────────────────
 SOURCE_DIR   = Path("/home/frank/Downloads/__Pinball")
 SMB_HOST     = "192.168.0.41"
@@ -256,9 +260,9 @@ class ResultDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Flippermove")
+        self.setWindowTitle(f"Flippermove  v{VERSION}")
         self.setWindowIcon(QIcon(resource_path("flippermove.png")))
-        self.resize(720, 520)
+        self.resize(720, 540)
         self._worker: MoveWorker | None = None
         self._items: list[Path] = []
 
@@ -267,9 +271,18 @@ class MainWindow(QMainWindow):
         vbox = QVBoxLayout(central)
         vbox.setSpacing(8)
 
-        hdr = QLabel(f"📁  {SOURCE_DIR}")
-        hdr.setFont(QFont("Sans", 10, QFont.Weight.Bold))
-        vbox.addWidget(hdr)
+        # Kopfzeile: Quellpfad links, Version rechts
+        hdr_row = QHBoxLayout()
+        hdr_path = QLabel(f"📁  {SOURCE_DIR}")
+        hdr_path.setFont(QFont("Sans", 10, QFont.Weight.Bold))
+        hdr_ver = QLabel(f"v{VERSION}")
+        hdr_ver.setFont(QFont("Sans", 9))
+        hdr_ver.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        hdr_ver.setStyleSheet("color: gray;")
+        hdr_row.addWidget(hdr_path)
+        hdr_row.addStretch()
+        hdr_row.addWidget(hdr_ver)
+        vbox.addLayout(hdr_row)
 
         self.file_list = QListWidget()
         self.file_list.setFont(QFont("Monospace", 10))
@@ -392,6 +405,7 @@ class MainWindow(QMainWindow):
 def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("Flippermove")
+    app.setApplicationVersion(VERSION)
     app.setOrganizationName("gecko1a")
     app.setWindowIcon(QIcon(resource_path("flippermove.png")))
     win = MainWindow()
